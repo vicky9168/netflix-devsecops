@@ -1,0 +1,172 @@
+pipeline {
+
+    agent any
+
+    tools {
+
+        jdk 'jdk24'
+        nodejs 'node24'
+
+    }
+
+    environment {
+
+        SCANNER_HOME = tool 'sonar-scanner'
+
+    }
+
+    stages {
+
+        stage('clean workspace') {
+
+            steps {
+
+                cleanWs()
+
+            }
+
+        }
+
+        stage('Checkout from Git') {
+
+            steps {
+
+                git branch: 'main', url: 'https://github.com/vicky9168/netflix-devsecops.git'
+
+            }
+
+        }
+
+        stage("Sonarqube Analysis") {
+
+            steps {
+
+                withSonarQubeEnv('sonar-server') {
+
+                    sh '''
+                    $SCANNER_HOME/bin/sonar-scanner \
+                    -Dsonar.projectName=netflix \
+                    -Dsonar.projectKey=netflix
+                    '''
+
+                }
+
+            }
+
+        }
+
+        stage("Quality Gate") {
+
+            steps {
+
+                script {
+
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+
+                }
+
+            }
+
+        }
+
+        stage('Install Dependencies') {
+
+            steps {
+
+                sh "npm install"
+
+            }
+
+        }
+
+        stage('TRIVY FS SCAN') {
+
+            steps {
+
+                sh "trivy fs . > trivyfs.txt"
+
+            }
+
+        }
+
+        stage('Docker Build & Push') {
+
+            steps {
+
+                script {
+
+                    withCredentials([usernamePassword(
+                        credentialsId: 'docker',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+
+                        sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                        docker build \
+                        --build-arg TMDB_V3_API_KEY=9c3025c5e3562e9a6e2d87ec108106c2 \
+                        -t netflix .
+
+                        docker tag netflix $DOCKER_USER/netflix:latest
+
+                        docker push $DOCKER_USER/netflix:latest
+                        '''
+
+                    }
+
+                }
+
+            }
+
+        }
+
+        stage("TRIVY IMAGE SCAN") {
+
+            steps {
+
+                sh "trivy image vickydockek11/netflix:latest > trivyimage.txt"
+
+            }
+
+        }
+
+        stage('Deploy to container') {
+
+            steps {
+
+                sh 'docker run -d --name netflix -p 8081:80 vickydockek11/netflix:latest'
+
+            }
+
+        }
+
+        stage('Deploy to Kubernetes') {
+
+            steps {
+
+                script {
+
+                    dir('Kubernetes') {
+
+                        withKubeConfig(
+                            credentialsId: 'k8s',
+                            namespace: 'default'
+                        ) {
+
+                            sh 'kubectl apply -f deployment.yml'
+                            sh 'kubectl apply -f service.yml'
+
+                        }
+
+                    }
+
+                }
+
+            }
+
+        }
+
+    }
+
+}
